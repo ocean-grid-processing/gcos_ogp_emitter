@@ -3,7 +3,8 @@
 
 The factory has done the analysis — the n_fac cross-layer combine, the annual mean, and the OHCA
 baseline window. Each per-level blob carries `ohca` (annual anomaly, basin-integrated TJ, referenced
-to its baseline window) plus `area_m2`, `volume_m3`, `cp0`, `rho0`, and the `time_window` it was built
+to its baseline window) plus `area_m2`, `volume_m3`, the `quantity` table (whose `scale_terms` hold
+`cp0` and `rho0`), and the `time_window` it was built
 with. This step packages one file spanning every level, expressing each level's anomaly three ways:
 
     GCOS_<lo>_<hi>_OHCA_J_m2_oc(y)      = ohca / area * 1e12                       [J/m^2]
@@ -142,27 +143,40 @@ def _band(level):
     return "%04d_%04d" % (lo, hi)
 
 
+def physical_constants(blob):
+    """(cp0, rho0) from the blob's `quantity` table — the ingest scale terms that turned integrated
+    temperature into heat content. A quantity without them can't be reported as a GCOS heat content."""
+    if "quantity" not in blob.attrs:
+        raise SystemExit("blob for level %s has no `quantity` attr (expected an ohc_derive blob)"
+                         % blob.attrs.get("level"))
+    terms = json.loads(blob.attrs["quantity"]).get("scale_terms", {})
+    if "cp0" not in terms or "rho0" not in terms:
+        raise SystemExit("level %s: the quantity's scale_terms lack cp0/rho0; GCOS needs the physical "
+                         "constants (got %s)" % (blob.attrs.get("level"), sorted(terms)))
+    return float(terms["cp0"]), float(terms["rho0"])
+
+
 def build_dataset(blobs, j_to_zj, tag, provenance_link, citation="", product_name=""):
     """The combined GCOS Dataset over `years`, three views per level, from the factory blobs.
 
-    Every blob must share the year axis, the baseline window, and cp0/rho0 (the deliverable is one
-    consistent set of levels); mismatches raise.
+    Every blob must share the year axis, the baseline window, and the quantity table (the deliverable
+    is one consistent set of levels); mismatches raise.
     """
-    years = window = cp0 = rho0 = None
+    years = window = quantity = None
     data_vars = {}
     for blob in blobs:
         yrs = blob["ohca"]["year"].values.astype("int64")
         if years is None:
-            years, window = yrs, blob.attrs["time_window"]
-            cp0, rho0 = float(blob.attrs["cp0"]), float(blob.attrs["rho0"])
+            years, window, quantity = yrs, blob.attrs["time_window"], blob.attrs["quantity"]
+            cp0, rho0 = physical_constants(blob)
         else:
             if not np.array_equal(yrs, years):
                 raise SystemExit("year axes differ across levels (at %s)" % blob.attrs["level"])
             if blob.attrs["time_window"] != window:
                 raise SystemExit("baseline windows differ across levels (%s vs %s)"
                                  % (blob.attrs["time_window"], window))
-            if (float(blob.attrs["cp0"]), float(blob.attrs["rho0"])) != (cp0, rho0):
-                raise SystemExit("cp0/rho0 differ across levels (at %s)" % blob.attrs["level"])
+            if blob.attrs.get("quantity") != quantity:
+                raise SystemExit("quantity tables differ across levels (at %s)" % blob.attrs["level"])
 
         area, vol = float(blob.attrs["area_m2"]), float(blob.attrs["volume_m3"])
         band = _band(blob.attrs["level"])
@@ -241,8 +255,7 @@ def main():
             raise SystemExit("%s carries no ohca; run ohc_derive with --quantities ohca" % p)
         if b.attrs.get("time_window", "all") == "all":
             raise SystemExit("%s has no baseline window; GCOS needs ohc_derive run with --time-window" % p)
-        if "cp0" not in b.attrs or "rho0" not in b.attrs:
-            raise SystemExit("%s lacks cp0/rho0; GCOS needs the physical constants" % p)
+        physical_constants(b)                                    # errors if the quantity lacks cp0/rho0
 
     out = build_dataset(blobs, cfg.j_to_zj, cfg.tag, cfg.provenance_link, cfg.citation, cfg.product_name)
     stamp_config_record(out, blobs, cfg)                        # whole chain -> one config_record attr

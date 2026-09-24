@@ -56,13 +56,17 @@ def test_config_record_consolidates_two_axes(tmp_path):
     assert out.attrs["product_name"] == "LocalGP"                   # standalone top-level key
 
 
-def _blob(level="0_2000", area=1e12, vol=1e15, window="2005-2024", with_sd=True):
-    """A synthetic ohc_derive blob: extensive ohca (TJ, baseline-referenced) + geometry + constants."""
+QUANTITY = {"name": "ohc", "kind": "extensive", "units": "J/m2", "long_name": "ocean heat content",
+            "scale_terms": {"cp0": 3989.0, "rho0": 1030.0}, "publish_unit_factor": 1e12, "publish_units": "TJ/m^2"}
+
+
+def _blob(level="0_2000", area=1e12, vol=1e15, window="2005-2024", with_sd=True, quantity=QUANTITY):
+    """A synthetic ohc_derive blob: extensive ohca (TJ, baseline-referenced) + geometry + the quantity table."""
     ds = xr.Dataset({"ohca": ("year", np.array([1.0, 2.0]))}, coords={"year": [2005, 2006]})
     if with_sd:
         ds["ohca_sd"] = ("year", np.array([0.1, 0.2]))
-    ds.attrs.update({"level": level, "area_m2": area, "volume_m3": vol, "cp0": 3989.0, "rho0": 1030.0,
-                     "time_window": window})
+    ds.attrs.update({"level": level, "area_m2": area, "volume_m3": vol, "time_window": window,
+                     "quantity": json.dumps(quantity)})
     return ds
 
 
@@ -112,11 +116,20 @@ def test_baseline_window_mismatch_errors():
                             _blob(level="0_2000", window="2004-2024")], 1e-21, "dev", None)
 
 
-def test_cp0_rho0_mismatch_errors():
-    other = _blob(level="0_700")
-    other.attrs["cp0"] = 4000.0
+def test_quantity_mismatch_errors():
+    other = _blob(level="0_700", quantity=dict(QUANTITY, scale_terms={"cp0": 4000.0, "rho0": 1030.0}))
     with pytest.raises(SystemExit):
         gcos.build_dataset([_blob(level="0_2000"), other], 1e-21, "dev", None)
+
+
+def test_physical_constants_come_from_the_quantity_scale_terms():
+    assert gcos.physical_constants(_blob()) == (3989.0, 1030.0)
+    with pytest.raises(SystemExit):                                  # no cp0/rho0: not a heat content
+        gcos.physical_constants(_blob(quantity=dict(QUANTITY, name="mld", scale_terms={})))
+    bare = _blob()
+    del bare.attrs["quantity"]
+    with pytest.raises(SystemExit):
+        gcos.physical_constants(bare)
 
 
 def test_filename():

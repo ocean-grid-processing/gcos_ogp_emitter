@@ -12,8 +12,9 @@ ohc_ingest ─▶ publish ─▶ ohc_derive (--quantities ohca --time-window 200
 
 The analysis is all upstream now. `ohc_derive` does the `n_fac` cross-layer combine, the annual mean,
 and the OHCA baseline window. Each per-level blob hands over `ohca` — the annual OHC anomaly,
-basin-integrated (TJ), already referenced to the baseline window — plus `area_m2`, `volume_m3`,
-`cp0`, `rho0`, and the `time_window` it was built with. This emitter is the packaging: express each
+basin-integrated (TJ), already referenced to the baseline window — plus `area_m2`, `volume_m3`, the
+`quantity` table (whose `scale_terms` carry `cp0` and `rho0`), and the `time_window` it was built with.
+This emitter is the packaging: express each
 level's anomaly three ways and assemble one file across levels.
 
 ## What it computes
@@ -29,7 +30,7 @@ GCOS_<lo>_<hi>_vol_ave_temp_anom(y) = area * OHCA_J_m2_oc / (cp0*rho0*volume)  #
 The baseline subtraction that defines the anomaly already happened in the factory (`--time-window`);
 this step never re-subtracts. `<lo>_<hi>` are the level's dbar bounds, zero-padded
 (`GCOS_0000_2000_…`). Every level lands in one file on a shared `years` axis, and the emitter errors
-if the levels disagree on the year axis, the baseline window, or cp0/rho0.
+if the levels disagree on the year axis, the baseline window, or the quantity table.
 
 > **OHCA_ZJ is true zettajoules** (`--j-to-zj`, default `1e-21`). The original scaled by `1e-15` =
 > J→**peta**joules, so its `_ZJ` column is mislabelled and 10⁶× too large. We emit real ZJ; pass
@@ -55,12 +56,13 @@ Each blob **must** carry:
 
 - data var **`ohca`** (annual anomaly, TJ), and **`ohca_sd`** for the `_sd` columns (present when the
   derive run kept the ensemble);
-- attrs **`area_m2`**, **`volume_m3`**, **`cp0`**, **`rho0`**, **`level`**, and **`time_window`** — a
+- attrs **`area_m2`**, **`volume_m3`**, **`quantity`**, **`level`**, and **`time_window`** — a
   real window, not `"all"`, since a GCOS file is defined by its baseline.
 
-The emitter errors on any missing piece. `cp0`/`rho0` ride in from the submissions' attributes and
-must agree across the levels. `--quantities ohca` is all GCOS needs — the three views are all derived
-from it.
+The emitter errors on any missing piece. `cp0`/`rho0` are read from the `quantity` table's
+`scale_terms` — the ingest factors that turned integrated temperature into heat content — so a
+quantity without them can't be reported as a GCOS heat content, and the table must agree across the
+levels. `--quantities ohca` is all GCOS needs — the three views are all derived from it.
 
 ## Usage
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""GCOS/WMO-report packaging: ohc_derive blobs -> one combined GCOS deliverable.
+"""GCOS/WMO-report packaging: ogp_derive blobs -> one combined GCOS deliverable.
 
 The factory has done the analysis — the n_fac cross-layer combine, the annual mean, and the OHCA
 baseline window. Each per-level blob carries `ohca` (annual anomaly, basin-integrated TJ, referenced
-to its baseline window) plus `area_m2`, `volume_m3`, `cp0`, `rho0`, and the `time_window` it was built
+to its baseline window) plus `area_m2`, `volume_m3`, the `quantity` table (whose `scale_terms` hold
+`cp0` and `rho0`), and the `time_window` it was built
 with. This step packages one file spanning every level, expressing each level's anomaly three ways:
 
     GCOS_<lo>_<hi>_OHCA_J_m2_oc(y)      = ohca / area * 1e12                       [J/m^2]
@@ -142,27 +143,40 @@ def _band(level):
     return "%04d_%04d" % (lo, hi)
 
 
+def physical_constants(blob):
+    """(cp0, rho0) from the blob's `quantity` table — the ingest scale terms that turned integrated
+    temperature into heat content. A quantity without them can't be reported as a GCOS heat content."""
+    if "quantity" not in blob.attrs:
+        raise SystemExit("blob for level %s has no `quantity` attr (expected an ogp_derive blob)"
+                         % blob.attrs.get("level"))
+    terms = json.loads(blob.attrs["quantity"]).get("scale_terms", {})
+    if "cp0" not in terms or "rho0" not in terms:
+        raise SystemExit("level %s: the quantity's scale_terms lack cp0/rho0; GCOS needs the physical "
+                         "constants (got %s)" % (blob.attrs.get("level"), sorted(terms)))
+    return float(terms["cp0"]), float(terms["rho0"])
+
+
 def build_dataset(blobs, j_to_zj, tag, provenance_link, citation="", product_name=""):
     """The combined GCOS Dataset over `years`, three views per level, from the factory blobs.
 
-    Every blob must share the year axis, the baseline window, and cp0/rho0 (the deliverable is one
-    consistent set of levels); mismatches raise.
+    Every blob must share the year axis, the baseline window, and the quantity table (the deliverable
+    is one consistent set of levels); mismatches raise.
     """
-    years = window = cp0 = rho0 = None
+    years = window = quantity = None
     data_vars = {}
     for blob in blobs:
         yrs = blob["ohca"]["year"].values.astype("int64")
         if years is None:
-            years, window = yrs, blob.attrs["time_window"]
-            cp0, rho0 = float(blob.attrs["cp0"]), float(blob.attrs["rho0"])
+            years, window, quantity = yrs, blob.attrs["time_window"], blob.attrs["quantity"]
+            cp0, rho0 = physical_constants(blob)
         else:
             if not np.array_equal(yrs, years):
                 raise SystemExit("year axes differ across levels (at %s)" % blob.attrs["level"])
             if blob.attrs["time_window"] != window:
                 raise SystemExit("baseline windows differ across levels (%s vs %s)"
                                  % (blob.attrs["time_window"], window))
-            if (float(blob.attrs["cp0"]), float(blob.attrs["rho0"])) != (cp0, rho0):
-                raise SystemExit("cp0/rho0 differ across levels (at %s)" % blob.attrs["level"])
+            if blob.attrs.get("quantity") != quantity:
+                raise SystemExit("quantity tables differ across levels (at %s)" % blob.attrs["level"])
 
         area, vol = float(blob.attrs["area_m2"]), float(blob.attrs["volume_m3"])
         band = _band(blob.attrs["level"])
@@ -211,13 +225,13 @@ def filename(tag, token, product_name, author):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="GCOS packaging: ohc_derive blobs -> GCOS deliverable")
-    ap.add_argument("blobs", nargs="+", help="ohc_derive outputs, one per synthetic level")
+    ap = argparse.ArgumentParser(description="GCOS packaging: ogp_derive blobs -> GCOS deliverable")
+    ap.add_argument("blobs", nargs="+", help="ogp_derive outputs, one per synthetic level")
     ap.add_argument("--tag", required=True, help="provenance tag: filename token + provenance_tag attr")
     ap.add_argument("--provenance-link", default=None, help="URL/path to the provenance record")
     ap.add_argument("--code-version", required=True,
-                    help="URL to the exact ohc_gcos_emitter code (commit/release); stamped as "
-                         "ohc_gcos_emitter_code_version")
+                    help="URL to the exact gcos_ogp_emitter code (commit/release); recorded as this "
+                         "stage's code_version inside config_record")
     ap.add_argument("--j-to-zj", default=1e-21, type=float,
                     help="OHCA_ZJ scale; 1e-21 = true zettajoules (default). Pass 1e-15 to byte-match "
                          "the original file, whose _ZJ column is actually petajoules.")
@@ -238,11 +252,10 @@ def main():
     blobs = [xr.open_dataset(p) for p in cfg.blobs]
     for p, b in zip(cfg.blobs, blobs):
         if "ohca" not in b.data_vars:
-            raise SystemExit("%s carries no ohca; run ohc_derive with --quantities ohca" % p)
+            raise SystemExit("%s carries no ohca; run ogp_derive with --quantities ohca" % p)
         if b.attrs.get("time_window", "all") == "all":
-            raise SystemExit("%s has no baseline window; GCOS needs ohc_derive run with --time-window" % p)
-        if "cp0" not in b.attrs or "rho0" not in b.attrs:
-            raise SystemExit("%s lacks cp0/rho0; GCOS needs the physical constants" % p)
+            raise SystemExit("%s has no baseline window; GCOS needs ogp_derive run with --time-window" % p)
+        physical_constants(b)                                    # errors if the quantity lacks cp0/rho0
 
     out = build_dataset(blobs, cfg.j_to_zj, cfg.tag, cfg.provenance_link, cfg.citation, cfg.product_name)
     stamp_config_record(out, blobs, cfg)                        # whole chain -> one config_record attr

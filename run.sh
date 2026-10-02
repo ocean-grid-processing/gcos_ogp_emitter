@@ -1,4 +1,4 @@
-for window in 2005_2024 2005_2025
+for window in 2005_2024
 do
     sbatch emit.slurm $window
 done
